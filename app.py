@@ -8,10 +8,10 @@ from docx import Document
 from openai import OpenAI
 from PIL import Image
 
-MODEL = "microsoft/Phi-4-mini-instruct"
+MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 MAX_CONTEXT_CHARS = 18000
 
-st.set_page_config(page_title="Phi-4 Document Reader", page_icon="📄", layout="wide")
+st.set_page_config(page_title="Qwen Document Reader", page_icon="📄", layout="wide")
 
 st.markdown("""
 <style>
@@ -21,7 +21,7 @@ st.markdown("""
 .small {opacity:.8; font-size:.92rem}
 </style>
 <div class="hero">
-  <h1>📄 Phi-4 Document Reader</h1>
+  <h1>📄 Qwen Document Reader</h1>
   <p>Upload a document, extract its text (including OCR), then summarize it or ask questions.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -80,7 +80,7 @@ def extract(upload):
     raise ValueError("Unsupported file type")
 
 
-def ask_phi4(instruction: str, document_text: str, token: str):
+def ask_model(instruction: str, document_text: str, token: str):
     client = OpenAI(
         base_url="https://router.huggingface.co/v1",
         api_key=token,
@@ -149,7 +149,7 @@ if upload:
         use_container_width=True,
     )
 
-    tab_chat, tab_text = st.tabs(["Ask Phi-4", "Extracted text"])
+    tab_chat, tab_text = st.tabs(["Ask Qwen", "Extracted text"])
 
     with tab_chat:
         if "messages" not in st.session_state:
@@ -188,16 +188,16 @@ if upload:
                 with st.chat_message("user"):
                     st.markdown(instruction)
                 with st.chat_message("assistant"):
-                    with st.spinner("Phi-4 is reading..."):
+                    with st.spinner("Qwen is reading..."):
                         try:
-                            answer = ask_phi4(instruction, text, token)
+                            answer = ask_model(instruction, text, token)
                             st.markdown(answer)
                             st.session_state.messages.append(
                                 {"role": "assistant", "content": answer}
                             )
                         except Exception as exc:
                             st.error(
-                                "Phi-4 request failed. Confirm HF_TOKEN has Inference "
+                                "Model request failed. Confirm HF_TOKEN has Inference "
                                 f"Providers permission. Details: {exc}"
                             )
 
