@@ -1,186 +1,207 @@
 import io
 import os
-import re
-from typing import List
 
-import fitz
-import numpy as np
+import fitz  # PyMuPDF
 import pytesseract
-import requests
 import streamlit as st
+from docx import Document
+from openai import OpenAI
 from PIL import Image
-from sklearn.feature_extraction.text import TfidfVectorizer
 
+MODEL = "microsoft/Phi-4-mini-instruct"
+MAX_CONTEXT_CHARS = 18000
 
 st.set_page_config(page_title="Phi-4 Document Reader", page_icon="📄", layout="wide")
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
-MODEL = os.getenv("OLLAMA_MODEL", "phi4-mini")
+st.markdown("""
+<style>
+.block-container {max-width: 1100px; padding-top: 2rem;}
+[data-testid="stFileUploader"] {border: 1px dashed #7c8cff; border-radius: 14px; padding: 1rem;}
+.hero {padding: 1.5rem; border-radius: 18px; background: linear-gradient(135deg,#1d2340,#303a73); color:white; margin-bottom:1rem;}
+.small {opacity:.8; font-size:.92rem}
+</style>
+<div class="hero">
+  <h1>📄 Phi-4 Document Reader</h1>
+  <p>Upload a document, extract its text (including OCR), then summarize it or ask questions.</p>
+</div>
+""", unsafe_allow_html=True)
 
 
-def clean_text(text: str) -> str:
-    text = text.replace("\x00", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+def get_token():
+    try:
+        return st.secrets["HF_TOKEN"]
+    except (KeyError, FileNotFoundError):
+        return os.getenv("HF_TOKEN", "")
 
 
-def ocr_image(image: Image.Image) -> str:
-    return clean_text(pytesseract.image_to_string(image.convert("RGB")))
-
-
-def extract_pdf(data: bytes) -> tuple[str, int]:
-    document = fitz.open(stream=data, filetype="pdf")
-    pages: List[str] = []
-    ocr_pages = 0
-    for number, page in enumerate(document, start=1):
-        text = clean_text(page.get_text("text"))
-        if len(text) < 40:
+@st.cache_data(show_spinner=False)
+def extract_pdf(data: bytes):
+    doc = fitz.open(stream=data, filetype="pdf")
+    pages, ocr_pages = [], 0
+    for number, page in enumerate(doc, start=1):
+        text = page.get_text("text").strip()
+        if len(text) < 30:
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
             image = Image.open(io.BytesIO(pix.tobytes("png")))
-            text = ocr_image(image)
+            text = pytesseract.image_to_string(image).strip()
             ocr_pages += 1
         pages.append(f"--- Page {number} ---\n{text}")
-    document.close()
-    return "\n\n".join(pages), ocr_pages
+    return "\n\n".join(pages), ocr_pages, len(doc)
 
 
-def extract_document(uploaded_file) -> tuple[str, int]:
-    data = uploaded_file.getvalue()
-    if uploaded_file.name.lower().endswith(".pdf"):
-        return extract_pdf(data)
-    return ocr_image(Image.open(io.BytesIO(data))), 1
+@st.cache_data(show_spinner=False)
+def extract_image(data: bytes):
+    image = Image.open(io.BytesIO(data)).convert("RGB")
+    return pytesseract.image_to_string(image).strip()
 
 
-def make_chunks(text: str, size: int = 3500, overlap: int = 350) -> List[str]:
-    if len(text) <= size:
-        return [text]
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + size, len(text))
-        if end < len(text):
-            paragraph_end = text.rfind("\n", start, end)
-            if paragraph_end > start + size // 2:
-                end = paragraph_end
-        chunks.append(text[start:end])
-        if end == len(text):
-            break
-        start = max(end - overlap, start + 1)
-    return chunks
+@st.cache_data(show_spinner=False)
+def extract_docx(data: bytes):
+    doc = Document(io.BytesIO(data))
+    blocks = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            blocks.append(" | ".join(cell.text.strip() for cell in row.cells))
+    return "\n".join(blocks)
 
 
-def relevant_context(question: str, text: str, top_k: int = 5) -> str:
-    chunks = make_chunks(text)
-    if len(chunks) <= top_k:
-        return "\n\n".join(chunks)
-    matrix = TfidfVectorizer(stop_words="english").fit_transform([question] + chunks)
-    scores = (matrix[1:] @ matrix[0].T).toarray().ravel()
-    selected = np.argsort(scores)[::-1][:top_k]
-    return "\n\n".join(chunks[index] for index in sorted(selected))
+def extract(upload):
+    data = upload.getvalue()
+    name = upload.name.lower()
+    if name.endswith(".pdf"):
+        text, ocr_pages, total_pages = extract_pdf(data)
+        return text, f"{total_pages} page(s); OCR used on {ocr_pages}"
+    if name.endswith((".png", ".jpg", ".jpeg", ".tiff", ".bmp")):
+        return extract_image(data), "Image processed with OCR"
+    if name.endswith(".docx"):
+        return extract_docx(data), "Word document parsed"
+    if name.endswith(".txt"):
+        return data.decode("utf-8", errors="replace"), "Text file read"
+    raise ValueError("Unsupported file type")
 
 
-def ask_phi(system_prompt: str, user_prompt: str) -> str:
-    response = requests.post(
-        f"{OLLAMA_URL}/api/chat",
-        json={
-            "model": MODEL,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "options": {"temperature": 0.2},
-        },
-        timeout=300,
+def ask_phi4(instruction: str, document_text: str, token: str):
+    client = OpenAI(
+        base_url="https://router.huggingface.co/v1",
+        api_key=token,
     )
-    response.raise_for_status()
-    return response.json()["message"]["content"]
+    clipped = document_text[:MAX_CONTEXT_CHARS]
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a careful document assistant. Answer only from the supplied "
+                    "document. If the answer is absent, say that it was not found."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"DOCUMENT:\n{clipped}\n\nTASK:\n{instruction}",
+            },
+        ],
+        temperature=0.2,
+        max_tokens=700,
+    )
+    return response.choices[0].message.content
 
-
-def model_is_ready() -> bool:
-    try:
-        return requests.get(f"{OLLAMA_URL}/api/tags", timeout=3).ok
-    except requests.RequestException:
-        return False
-
-
-st.title("📄 Phi-4 Document Reader")
-st.caption("Private, local document OCR, summaries, and question answering with Phi-4 Mini")
 
 with st.sidebar:
-    st.subheader("Local model")
-    if model_is_ready():
-        st.success(f"Connected to {MODEL}")
+    st.header("Settings")
+    st.caption(f"Model: {MODEL}")
+    token = get_token()
+    if token:
+        st.success("HF token detected")
     else:
-        st.error("Ollama is not reachable")
-        st.code("ollama serve\nollama pull phi4-mini", language="bash")
-    st.info("Uploaded content is processed by this Streamlit server. With local Ollama, it is not sent to an AI cloud API.")
+        st.warning("Add HF_TOKEN in Streamlit secrets")
+    st.markdown(
+        "Supported: **PDF, scanned PDF, PNG, JPG, TIFF, BMP, DOCX, TXT**"
+    )
+    st.caption("Files are processed during the session and are not intentionally stored.")
 
-uploaded = st.file_uploader(
-    "Upload a PDF or scanned document",
-    type=["pdf", "png", "jpg", "jpeg", "tif", "tiff"],
-    max_upload_size=25,
+upload = st.file_uploader(
+    "Upload a document",
+    type=["pdf", "png", "jpg", "jpeg", "tiff", "bmp", "docx", "txt"],
 )
 
-if uploaded:
-    file_key = f"{uploaded.name}:{uploaded.size}"
-    if st.session_state.get("file_key") != file_key:
+if upload:
+    try:
         with st.spinner("Reading document and running OCR where needed..."):
-            try:
-                text, ocr_pages = extract_document(uploaded)
-                st.session_state.update(file_key=file_key, document_text=text, ocr_pages=ocr_pages)
-            except Exception as exc:
-                st.error(f"Could not read this file: {exc}")
-                st.stop()
-
-    text = st.session_state.document_text
-    if not text.strip():
-        st.warning("No readable text was found. Try a clearer scan or install the correct Tesseract language pack.")
+            text, details = extract(upload)
+    except Exception as exc:
+        st.error(f"Could not read this document: {exc}")
         st.stop()
 
-    words = len(text.split())
+    if not text.strip():
+        st.error("No readable text was found. Try a clearer scan.")
+        st.stop()
+
+    st.success(f"Text extracted — {details}")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Words", f"{words:,}")
-    col2.metric("Characters", f"{len(text):,}")
-    col3.metric("OCR pages", st.session_state.ocr_pages)
+    col1.metric("Characters", f"{len(text):,}")
+    col2.metric("Words", f"{len(text.split()):,}")
+    col3.download_button(
+        "Download text",
+        text,
+        file_name=f"{upload.name.rsplit('.', 1)[0]}_text.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
 
-    tab1, tab2, tab3 = st.tabs(["Extracted text", "AI summary", "Ask the document"])
+    tab_chat, tab_text = st.tabs(["Ask Phi-4", "Extracted text"])
 
-    with tab1:
-        st.text_area("Recognized text", text, height=480)
-        st.download_button("Download text", text, file_name=f"{uploaded.name}.txt", mime="text/plain")
+    with tab_chat:
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
-    with tab2:
-        summary_style = st.selectbox("Summary type", ["Short overview", "Detailed summary", "Key facts and action items"])
-        if st.button("Generate summary", type="primary"):
-            if not model_is_ready():
-                st.error("Start Ollama and pull phi4-mini first.")
+        action_col1, action_col2, action_col3 = st.columns(3)
+        summarize = action_col1.button("Summarize", use_container_width=True)
+        key_points = action_col2.button("Key points", use_container_width=True)
+        clear = action_col3.button("Clear chat", use_container_width=True)
+
+        if clear:
+            st.session_state.messages = []
+            st.rerun()
+
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        prompt = st.chat_input("Ask a question about this document")
+        instruction = (
+            "Give a concise summary with headings."
+            if summarize
+            else "List the most important facts and action items."
+            if key_points
+            else prompt
+        )
+
+        if instruction:
+            if not token:
+                st.error(
+                    "Add your Hugging Face access token as HF_TOKEN in "
+                    "Streamlit Cloud → App settings → Secrets."
+                )
             else:
-                source = "\n\n".join(make_chunks(text)[:8])
-                prompt = f"Create a {summary_style.lower()} of the document below. Use only the document. State when something is unclear.\n\nDOCUMENT:\n{source}"
-                with st.spinner("Phi-4 is reading..."):
-                    try:
-                        st.session_state.summary = ask_phi("You are a careful document analyst.", prompt)
-                    except requests.RequestException as exc:
-                        st.error(f"Model request failed: {exc}")
-        if st.session_state.get("summary"):
-            st.markdown(st.session_state.summary)
+                st.session_state.messages.append({"role": "user", "content": instruction})
+                with st.chat_message("user"):
+                    st.markdown(instruction)
+                with st.chat_message("assistant"):
+                    with st.spinner("Phi-4 is reading..."):
+                        try:
+                            answer = ask_phi4(instruction, text, token)
+                            st.markdown(answer)
+                            st.session_state.messages.append(
+                                {"role": "assistant", "content": answer}
+                            )
+                        except Exception as exc:
+                            st.error(
+                                "Phi-4 request failed. Confirm HF_TOKEN has Inference "
+                                f"Providers permission. Details: {exc}"
+                            )
 
-    with tab3:
-        question = st.text_input("Ask a question", placeholder="What are the main obligations in this document?")
-        if st.button("Ask Phi-4") and question:
-            if not model_is_ready():
-                st.error("Start Ollama and pull phi4-mini first.")
-            else:
-                context = relevant_context(question, text)
-                prompt = f"Answer the question using only the supplied document excerpts. If the answer is absent, say so.\n\nQUESTION:\n{question}\n\nDOCUMENT EXCERPTS:\n{context}"
-                with st.spinner("Finding the answer..."):
-                    try:
-                        answer = ask_phi("You answer questions grounded strictly in the provided document.", prompt)
-                        st.markdown(answer)
-                    except requests.RequestException as exc:
-                        st.error(f"Model request failed: {exc}")
+    with tab_text:
+        st.text_area("OCR / extracted text", text, height=520)
 else:
-    st.info("Upload a document to begin. Digital PDFs use embedded text; scanned pages and images use OCR automatically.")
-
+    st.info("Upload a file to begin. A sample PDF or phone photo works well.")
