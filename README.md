@@ -1,6 +1,6 @@
-# Phi-4 Document Reader
+# Qwen Document Reader
 
-A Streamlit demo that reads documents, performs OCR on scans, and uses Microsoft's **Phi-4 Mini Instruct** model to summarize the content or answer questions.
+A Streamlit demo that reads documents, performs OCR on scans, and uses **Qwen3-4B Instruct** model to summarize the content or answer questions.
 
 ## Features
 
@@ -54,7 +54,7 @@ Streamlit Cloud installs it automatically from `packages.txt`.
 1. PyMuPDF extracts text from normal PDFs.
 2. Pages with little or no embedded text are rendered as images.
 3. Tesseract OCR reads scanned pages and uploaded photos.
-4. The extracted text is sent with the user's task to `microsoft/Phi-4-mini-instruct` through Hugging Face's OpenAI-compatible inference endpoint.
+4. The extracted text is sent with the user's task to `Qwen/Qwen3-4B-Instruct-2507` through Hugging Face's OpenAI-compatible inference endpoint.
 
 The demo limits model context to the first 18,000 characters to keep requests fast and reliable. For production, add chunking, retrieval, authentication, virus scanning, and durable storage.
 
@@ -72,6 +72,6 @@ Confirm the repository contains a file named exactly `packages.txt` with:
 tesseract-ocr
 ```
 
-### Phi-4 request fails
+### Model request fails
 
 Check that `HF_TOKEN` is present in Streamlit secrets and has permission to use Hugging Face Inference Providers.
