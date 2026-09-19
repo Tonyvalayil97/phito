@@ -1,10 +1,15 @@
-# Qwen Document Reader
+# AI Document Intelligence
 
-A Streamlit demo that reads documents, performs OCR on scans, and uses **Qwen3-4B Instruct** model to summarize the content or answer questions.
+A Streamlit document-intelligence demo that reads documents, performs OCR, extracts structured tables, creates interactive charts, and uses **Qwen3-4B Instruct** for grounded summaries and questions.
 
 ## Features
 
 - Reads PDFs, scanned PDFs, images, DOCX and TXT
+- Extracts structured tables from digital PDFs and DOCX
+- Previews tables and downloads them as CSV
+- Calculates numeric statistics automatically
+- Creates bar, line and area charts from detected numeric columns
+- Generates AI summaries of document text and table data
 - Uses Tesseract OCR for scanned pages and photos
 - Shows and downloads extracted text
 - Summarizes documents and extracts key points
@@ -56,7 +61,7 @@ Streamlit Cloud installs it automatically from `packages.txt`.
 3. Tesseract OCR reads scanned pages and uploaded photos.
 4. The extracted text is sent with the user's task to `Qwen/Qwen3-4B-Instruct-2507` through Hugging Face's OpenAI-compatible inference endpoint.
 
-The demo limits model context to the first 18,000 characters to keep requests fast and reliable. For production, add chunking, retrieval, authentication, virus scanning, and durable storage.
+The demo limits model context to the first 18,000 characters to keep requests fast and reliable. Structured table extraction works best on digital PDFs with selectable text. Scanned pages use OCR for text, but reliable row-and-column recovery may require a specialized table-OCR service. For production, add chunking, retrieval, authentication, virus scanning, and durable storage.
 
 ## Troubleshooting
 
